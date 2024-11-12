@@ -1,31 +1,35 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+import json
 import openai
-import os
+from .config.settings import Config
 
-app = Flask(__name__)
-CORS(app)
-
-openai.api_key = os.environ.get('OPENAI_API_KEY')
-
-@app.route('/api/chat', methods=['POST'])
-def chat():
+def lambda_handler(event, context):
     try:
-        data = request.json
-        message = data.get('message')
+        body = json.loads(event['body'])
+        message = body.get('message')
         
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+            model=Config.OPENAI_MODEL,
             messages=[
                 {"role": "user", "content": message}
             ]
         )
         
-        return jsonify({
-            'response': response.choices[0].message.content
-        })
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Content-Type',
+                'Access-Control-Allow-Methods': 'OPTIONS,POST'
+            },
+            'body': json.dumps({
+                'response': response.choices[0].message.content
+            })
+        }
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001) 
+        return {
+            'statusCode': 500,
+            'headers': {
+                'Access-Control-Allow-Origin': '*'
+            },
+            'body': json.dumps({'error': str(e)})
+        } 

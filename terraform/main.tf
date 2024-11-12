@@ -1,138 +1,105 @@
 provider "aws" {
-  region = "us-west-2"
+  region = var.aws_region
 }
 
-# VPC and Networking
-resource "aws_vpc" "main" {
-  cidr_block           = "10.0.0.0/16"
-  enable_dns_hostnames = true
-  enable_dns_support   = true
+# S3 bucket for frontend
+resource "aws_s3_bucket" "frontend" {
+  bucket = "${var.app_name}-${var.environment}-frontend"
+}
 
-  tags = {
-    Name = "chatbot-vpc"
+resource "aws_s3_bucket_website_configuration" "frontend" {
+  bucket = aws_s3_bucket.frontend.id
+  index_document {
+    suffix = "index.html"
+  }
+  error_document {
+    key = "index.html"
   }
 }
 
-resource "aws_subnet" "public" {
-  count             = 2
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = "10.0.${count.index + 1}.0/24"
-  availability_zone = data.aws_availability_zones.available.names[count.index]
+# CloudFront distribution
+resource "aws_cloudfront_distribution" "frontend" {
+  enabled             = true
+  default_root_object = "index.html"
 
-  tags = {
-    Name = "chatbot-public-${count.index + 1}"
-  }
-}
+  origin {
+    domain_name = aws_s3_bucket.frontend.bucket_regional_domain_name
+    origin_id   = "S3-${aws_s3_bucket.frontend.id}"
 
-# ECS Cluster
-resource "aws_ecs_cluster" "main" {
-  name = "chatbot-cluster"
-}
-
-# ECR Repositories
-resource "aws_ecr_repository" "frontend" {
-  name = "chatbot-frontend"
-}
-
-resource "aws_ecr_repository" "backend" {
-  name = "chatbot-backend"
-}
-
-# ECS Task Definitions
-resource "aws_ecs_task_definition" "frontend" {
-  family                   = "chatbot-frontend"
-  network_mode            = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                     = 256
-  memory                  = 512
-
-  container_definitions = jsonencode([
-    {
-      name  = "frontend"
-      image = "${aws_ecr_repository.frontend.repository_url}:latest"
-      portMappings = [
-        {
-          containerPort = 80
-          hostPort      = 80
-          protocol      = "tcp"
-        }
-      ]
+    s3_origin_config {
+      origin_access_identity = aws_cloudfront_origin_access_identity.frontend.cloudfront_access_identity_path
     }
-  ])
-}
+  }
 
-resource "aws_ecs_task_definition" "backend" {
-  family                   = "chatbot-backend"
-  network_mode            = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                     = 256
-  memory                  = 512
+  default_cache_behavior {
+    allowed_methods        = ["GET", "HEAD", "OPTIONS"]
+    cached_methods         = ["GET", "HEAD"]
+    target_origin_id       = "S3-${aws_s3_bucket.frontend.id}"
+    viewer_protocol_policy = "redirect-to-https"
 
-  container_definitions = jsonencode([
-    {
-      name  = "backend"
-      image = "${aws_ecr_repository.backend.repository_url}:latest"
-      portMappings = [
-        {
-          containerPort = 5000
-          hostPort      = 5000
-          protocol      = "tcp"
-        }
-      ]
-      environment = [
-        {
-          name  = "OPENAI_API_KEY"
-          value = var.openai_api_key
-        }
-      ]
+    forwarded_values {
+      query_string = false
+      cookies {
+        forward = "none"
+      }
     }
-  ])
-}
-
-# Application Load Balancer
-resource "aws_lb" "main" {
-  name               = "chatbot-alb"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets           = aws_subnet.public[*].id
-}
-
-# ECS Services
-resource "aws_ecs_service" "frontend" {
-  name            = "chatbot-frontend"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.frontend.arn
-  desired_count   = 2
-  launch_type     = "FARGATE"
-
-  network_configuration {
-    subnets         = aws_subnet.public[*].id
-    security_groups = [aws_security_group.ecs_tasks.id]
   }
 
-  load_balancer {
-    target_group_arn = aws_lb_target_group.frontend.arn
-    container_name   = "frontend"
-    container_port   = 80
+  viewer_certificate {
+    cloudfront_default_certificate = true
+  }
+
+  restrictions {
+    geo_restriction {
+      restriction_type = "none"
+    }
   }
 }
 
-resource "aws_ecs_service" "backend" {
-  name            = "chatbot-backend"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.backend.arn
-  desired_count   = 2
-  launch_type     = "FARGATE"
+# Lambda function for backend
+resource "aws_lambda_function" "backend" {
+  filename         = "../backend/deployment-package.zip"
+  function_name    = "${var.app_name}-${var.environment}-backend"
+  role            = aws_iam_role.lambda_role.arn
+  handler         = "src.app.lambda_handler"
+  runtime         = "python3.9"
 
-  network_configuration {
-    subnets         = aws_subnet.public[*].id
-    security_groups = [aws_security_group.ecs_tasks.id]
+  environment {
+    variables = {
+      OPENAI_API_KEY = var.openai_api_key
+      ENVIRONMENT    = var.environment
+    }
   }
+}
 
-  load_balancer {
-    target_group_arn = aws_lb_target_group.backend.arn
-    container_name   = "backend"
-    container_port   = 5000
+# API Gateway
+resource "aws_apigatewayv2_api" "main" {
+  name          = "${var.app_name}-${var.environment}"
+  protocol_type = "HTTP"
+  cors_configuration {
+    allow_origins = ["https://${aws_cloudfront_distribution.frontend.domain_name}"]
+    allow_methods = ["POST", "OPTIONS"]
+    allow_headers = ["Content-Type"]
+    max_age      = 300
   }
+}
+
+resource "aws_apigatewayv2_integration" "lambda" {
+  api_id           = aws_apigatewayv2_api.main.id
+  integration_type = "AWS_PROXY"
+
+  integration_uri    = aws_lambda_function.backend.invoke_arn
+  integration_method = "POST"
+}
+
+resource "aws_apigatewayv2_route" "chat" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "POST /chat"
+  target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+}
+
+resource "aws_apigatewayv2_stage" "default" {
+  api_id      = aws_apigatewayv2_api.main.id
+  name        = "$default"
+  auto_deploy = true
 } 

@@ -2,9 +2,11 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+COPY requirements/dev.txt requirements/dev.txt
+COPY requirements/base.txt requirements/base.txt
 
-COPY src/ .
+RUN pip install -r requirements/dev.txt
 
-CMD ["python", "app.py"] 
+COPY src /app/src
+
+CMD ["python", "/app/src/app.py"] 
