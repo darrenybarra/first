@@ -2,6 +2,17 @@ provider "aws" {
   region = var.aws_region
 }
 
+module "aws_oidc_github" {
+  source  = "unfunco/oidc-github/aws"
+  version = "1.8.0"
+
+  github_repositories = [
+    var.github_repository
+  ]
+
+  attach_admin_policy = true
+}
+
 # S3 bucket for frontend
 resource "aws_s3_bucket" "frontend" {
   bucket = "${var.app_name}-${var.environment}-frontend"
